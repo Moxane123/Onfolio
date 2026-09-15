@@ -32,6 +32,7 @@ export const WalletScanner: React.FC = () => {
     scanError,
     scanAddress,
     setConnectWalletModalOpen,
+    setSettingsModalOpen,
     loadSampleProfile,
     portfolio,
     passport,
@@ -276,6 +277,9 @@ export const WalletScanner: React.FC = () => {
           }}
           onLoadSample={() => {
             loadSampleProfile(DEV_SAMPLE_WALLETS[0].address);
+          }}
+          onOpenSettings={() => {
+            setSettingsModalOpen(true);
           }}
         />
 

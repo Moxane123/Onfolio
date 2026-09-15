@@ -1,15 +1,37 @@
 /**
  * Onfolio — Asset Recognizer Service
- * Detects whether a Solana token account corresponds to a recognized tokenized equity or RWA.
+ *
+ * Authoritatively identifies whether a Solana token corresponds to a verified tokenized equity or RWA.
+ *
+ * CRITICAL RULE (Audit Mandate):
+ * "Never identify an asset solely by ticker/symbol. A token saying 'AAPL' is not automatically Apple stock.
+ * Use trusted metadata/issuer mappings and explicit registry records."
+ *
+ * The registry supports multiple tokenized representations of the same underlying asset:
+ * UNDERLYING SECURITY → TOKENIZED REPRESENTATION → ISSUER → SOLANA MINT.
+ *
+ * Unknown assets must remain visible as unknown tokens rather than being falsely classified.
  */
 
 import { TokenizedEquity } from '../../types';
-import { MINT_MAP, SYMBOL_MAP, TICKER_MAP, VERIFIED_TOKENIZED_EQUITIES } from './catalog';
+import { recordToTokenizedEquity } from './catalog';
+import { assetRegistry } from './registry';
+import {
+  AssetRecognitionResult,
+  AssetVerificationStatus,
+  TokenizedAssetRecord,
+  UnderlyingSecurity,
+} from './types';
 
 export interface TokenRecognitionResult {
   isRecognized: boolean;
+  status: AssetVerificationStatus;
   equity?: TokenizedEquity;
-  confidence: 'EXACT_MINT_MATCH' | 'SYMBOL_MATCH' | 'UNRECOGNIZED';
+  record?: TokenizedAssetRecord;
+  underlying?: UnderlyingSecurity;
+  confidence: 'EXACT_MINT_MATCH' | 'REJECTED_IMPOSTOR' | 'UNREGISTERED_MINT';
+  isImpostorRisk: boolean;
+  detectedTickerMatch?: string;
   reason?: string;
 }
 
@@ -18,65 +40,42 @@ export function recognizeToken(
   symbolHint?: string,
   nameHint?: string
 ): TokenRecognitionResult {
-  const normalizedMint = mintAddress.trim().toLowerCase();
+  const result: AssetRecognitionResult = assetRegistry.verifyToken(
+    mintAddress,
+    symbolHint,
+    nameHint
+  );
 
-  // 1. Direct mint address match
-  if (MINT_MAP.has(normalizedMint)) {
+  if (result.isRecognized && result.asset) {
     return {
       isRecognized: true,
-      equity: MINT_MAP.get(normalizedMint),
+      status: result.status,
+      equity: recordToTokenizedEquity(result.asset),
+      record: result.asset,
+      underlying: result.underlying,
       confidence: 'EXACT_MINT_MATCH',
+      isImpostorRisk: false,
+      reason: result.reason,
     };
   }
 
-  // 2. Exact token symbol match (e.g., 'dAAPL', 'bSPY')
-  if (symbolHint) {
-    const normSymbol = symbolHint.trim().toUpperCase();
-    if (SYMBOL_MAP.has(normSymbol)) {
-      return {
-        isRecognized: true,
-        equity: SYMBOL_MAP.get(normSymbol),
-        confidence: 'SYMBOL_MATCH',
-        reason: `Matched registered ticker symbol: ${normSymbol}`,
-      };
-    }
-
-    // Check underlying ticker (e.g. user or token named 'AAPL')
-    if (TICKER_MAP.has(normSymbol)) {
-      return {
-        isRecognized: true,
-        equity: TICKER_MAP.get(normSymbol),
-        confidence: 'SYMBOL_MATCH',
-        reason: `Matched underlying equity ticker: ${normSymbol}`,
-      };
-    }
-  }
-
-  // 3. Heuristic matching on token name (e.g., "Apple Inc.", "Backed S&P 500")
-  if (nameHint) {
-    const lowerName = nameHint.toLowerCase();
-    const candidate = VERIFIED_TOKENIZED_EQUITIES.find((asset) =>
-      lowerName.includes(asset.companyName.toLowerCase()) ||
-      lowerName.includes(asset.underlyingTicker.toLowerCase())
-    );
-
-    if (candidate) {
-      return {
-        isRecognized: true,
-        equity: candidate,
-        confidence: 'SYMBOL_MATCH',
-        reason: `Matched verified company description: ${candidate.companyName}`,
-      };
-    }
-  }
+  // Impostor risk detection
+  const isImpostor = result.confidence === 'REJECTED_IMPOSTOR';
 
   return {
     isRecognized: false,
-    confidence: 'UNRECOGNIZED',
-    reason: 'Token is not registered in the verified Onfolio Tokenized Equity Registry',
+    status: result.status,
+    confidence: isImpostor ? 'REJECTED_IMPOSTOR' : 'UNREGISTERED_MINT',
+    isImpostorRisk: isImpostor,
+    detectedTickerMatch: result.detectedTickerMatch,
+    reason: result.reason,
   };
 }
 
 export function getAllVerifiedEquities(): TokenizedEquity[] {
-  return [...VERIFIED_TOKENIZED_EQUITIES];
+  return assetRegistry.getAllAssets().map(recordToTokenizedEquity);
+}
+
+export function getRegistryStats() {
+  return assetRegistry.getStats();
 }

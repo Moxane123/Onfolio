@@ -26,12 +26,12 @@ import { Badge } from '../ui/Badge';
 import { formatAbbreviatedAddress } from '../../services/wallet/walletService';
 
 export interface HeaderProps {
-  activeTab?: 'passport' | 'holdings' | 'audit';
-  onTabChange?: (tab: 'passport' | 'holdings' | 'audit') => void;
+  activeTab?: 'dashboard' | 'passport' | 'holdings' | 'audit';
+  onTabChange?: (tab: 'dashboard' | 'passport' | 'holdings' | 'audit') => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
-  activeTab = 'passport',
+  activeTab = 'dashboard',
   onTabChange,
 }) => {
   const { user, signOut, signInWithGoogle } = useAuth();
@@ -41,6 +41,7 @@ export const Header: React.FC<HeaderProps> = ({
     setSettingsModalOpen,
     setVerificationModalOpen,
     setConnectWalletModalOpen,
+    setRegistryModalOpen,
     wallet,
     portfolio,
     isScanning,
@@ -49,7 +50,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
   const isMock = portfolio?.isMockData ?? preferences.useDevAdapter;
 
-  const handleTabClick = (tab: 'passport' | 'holdings' | 'audit') => {
+  const handleTabClick = (tab: 'dashboard' | 'passport' | 'holdings' | 'audit') => {
     if (tab === 'audit') {
       setVerificationModalOpen(true);
     } else if (onTabChange) {
@@ -75,6 +76,17 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Global Navigation Links */}
           <nav className="hidden md:flex items-center space-x-1" aria-label="Main Navigation">
             <button
+              id="nav-dashboard-tab"
+              onClick={() => handleTabClick('dashboard')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
+                activeTab === 'dashboard'
+                  ? 'bg-[#FAF0EB] text-[#D26E46]'
+                  : 'text-[#4A5361] hover:text-[#191F28] hover:bg-[#F4F0EB]'
+              }`}
+            >
+              Dashboard
+            </button>
+            <button
               id="nav-passport-tab"
               onClick={() => handleTabClick('passport')}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer ${
@@ -94,7 +106,7 @@ export const Header: React.FC<HeaderProps> = ({
                   : 'text-[#4A5361] hover:text-[#191F28] hover:bg-[#F4F0EB]'
               }`}
             >
-              Holdings &amp; Backing
+              Holdings
             </button>
             <button
               id="nav-audit-tab"
@@ -103,6 +115,14 @@ export const Header: React.FC<HeaderProps> = ({
             >
               <FileCheck2 className="w-3.5 h-3.5 text-[#D26E46]" />
               <span>Verification Audit</span>
+            </button>
+            <button
+              id="nav-registry-tab"
+              onClick={() => setRegistryModalOpen(true)}
+              className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-[#4A5361] hover:text-[#191F28] hover:bg-[#F4F0EB] transition-all cursor-pointer flex items-center space-x-1"
+            >
+              <Layers className="w-3.5 h-3.5 text-[#D26E46]" />
+              <span>Asset Registry</span>
             </button>
           </nav>
         </div>

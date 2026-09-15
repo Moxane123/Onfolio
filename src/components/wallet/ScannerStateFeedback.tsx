@@ -20,6 +20,7 @@ interface ScannerStateFeedbackProps {
   verifiedValueUsd?: number;
   onRetry?: () => void;
   onLoadSample?: () => void;
+  onOpenSettings?: () => void;
 }
 
 export const ScannerStateFeedback: React.FC<ScannerStateFeedbackProps> = ({
@@ -30,6 +31,7 @@ export const ScannerStateFeedback: React.FC<ScannerStateFeedbackProps> = ({
   verifiedValueUsd = 0,
   onRetry,
   onLoadSample,
+  onOpenSettings,
 }) => {
   if (state === 'idle') {
     return (
@@ -131,21 +133,32 @@ export const ScannerStateFeedback: React.FC<ScannerStateFeedbackProps> = ({
           <AlertCircle className="w-4 h-4 text-[#D92D20] mt-0.5 shrink-0" />
           <div>
             <span className="font-bold block text-sm text-[#912018]">Network or Ledger Error</span>
-            <p className="text-xs text-[#B42318] mt-0.5">
+            <p className="text-xs text-[#B42318] mt-0.5 leading-relaxed">
               {errorMessage || 'Failed to reach the Solana RPC endpoint. The public cluster may be experiencing rate limits or CORS restrictions.'}
             </p>
           </div>
         </div>
 
-        {onRetry && (
-          <button
-            type="button"
-            onClick={onRetry}
-            className="px-3 py-1.5 bg-white border border-[#FECDCA] hover:bg-[#FEE4E2] text-[#912018] font-semibold rounded-lg shrink-0 transition-colors cursor-pointer"
-          >
-            Retry
-          </button>
-        )}
+        <div className="flex items-center space-x-2 shrink-0">
+          {onOpenSettings && (
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="px-3 py-1.5 bg-[#FAF8F5] border border-[#E8E3DC] hover:bg-[#F4F0EB] text-[#191F28] font-semibold rounded-lg transition-colors cursor-pointer text-xs"
+            >
+              Configure RPC
+            </button>
+          )}
+          {onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="px-3 py-1.5 bg-white border border-[#FECDCA] hover:bg-[#FEE4E2] text-[#912018] font-semibold rounded-lg transition-colors cursor-pointer text-xs"
+            >
+              Retry
+            </button>
+          )}
+        </div>
       </div>
     );
   }

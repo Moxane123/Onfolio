@@ -84,6 +84,77 @@ export type CollateralModel =
   | 'Depository Trust Company (DTC) Custody'
   | 'Synthetic Over-Collateralized';
 
+export type AssetVerificationStatus =
+  | 'verified'
+  | 'supported'
+  | 'unknown'
+  | 'unsupported'
+  | 'stale metadata';
+
+export interface PriceSourceInfo {
+  provider: string;
+  feedId?: string;
+  indicativePriceUsd: number;
+  lastUpdated: string;
+  quoteCurrency: 'USD';
+  latencySeconds?: number;
+  confidenceScore?: number;
+}
+
+export interface ExplorerReference {
+  solscanUrl: string;
+  solanaFmUrl: string;
+  explorerSolanaUrl: string;
+}
+
+export interface ConsolidatedUnderlyingHolding {
+  underlying: {
+    ticker: string;
+    companyName: string;
+    sector: string;
+    isin: string;
+    primaryExchange: string;
+    description: string;
+    marketPriceUsd: number;
+    change24h: number;
+    priceSource: PriceSourceInfo;
+    lastUpdated: string;
+    tokenizedRepresentations: string[];
+  };
+  totalAmount: number;
+  totalValueUsd: number;
+  allocationPercentage: number;
+  representations: Array<{
+    mint: string;
+    tokenAccountAddress: string;
+    symbol: string;
+    name: string;
+    issuerName: string;
+    amount: number;
+    valueUsd: number;
+    isToken2022: boolean;
+    verificationStatus: AssetVerificationStatus;
+    prospectusUrl?: string;
+    custodian: string;
+  }>;
+  issuers: string[];
+}
+
+export interface UnknownTokenHolding {
+  mint: string;
+  tokenAccountAddress: string;
+  amount: number;
+  rawBalance: string;
+  decimals: number;
+  symbol?: string;
+  name?: string;
+  isToken2022: boolean;
+  status: 'unknown' | 'unsupported';
+  isImpostorRisk: boolean;
+  detectedTickerMatch?: string;
+  rejectionReason: string;
+}
+
 export interface TokenizedEquity extends Asset {
   /** Underlying stock market ticker (e.g., 'AAPL', 'NVDA', 'TSLA', 'SPY', 'MSFT') */
   underlyingTicker: string;
@@ -111,6 +182,98 @@ export interface TokenizedEquity extends Asset {
   isToken2022?: boolean;
 }
 
+export type PricingFreshnessStatus = 'live' | 'delayed' | 'estimated';
+
+export interface PricingFreshness {
+  /** Pricing status indicator */
+  status: PricingFreshnessStatus;
+  /** Label describing pricing mode, e.g. "Market-Hours Delayed (15m)" */
+  label: string;
+  /** Delay in minutes */
+  delayMinutes: number;
+  /** Pricing source attribution, e.g. "Onfolio Financial Engine / SEC Filings Feed" */
+  provider: string;
+  /** Timestamp when price was quoted */
+  lastUpdated: string;
+  /** Whether current data is considered stale */
+  isStale: boolean;
+  /** Warning message if data is stale */
+  staleMessage?: string;
+  /** Disclaimer clarifying non-realtime nature */
+  pricingDisclaimer: string;
+}
+
+export type CostBasisStatus = 'determined' | 'estimated_24h' | 'unavailable';
+
+export interface HoldingPerformance {
+  /** 24h market price dollar change */
+  change24hUsd: number;
+  /** 24h market percentage change */
+  change24hPercent: number;
+  /** Reliably determined historical acquisition cost basis, if onchain transfer data exists */
+  costBasisUsd?: number;
+  /** Cost basis per share if determinable */
+  costBasisPerShare?: number;
+  /** Unrealized gain/loss in USD if cost basis is determinable */
+  unrealizedGainLossUsd?: number;
+  /** Unrealized gain/loss percentage if cost basis is determinable */
+  unrealizedGainLossPercent?: number;
+  /** Status of cost basis calculation */
+  costBasisStatus: CostBasisStatus;
+  /** Clear human-readable performance label */
+  performanceLabel: string;
+  /** Explanatory note respecting audit rule: never invent cost basis */
+  performanceDisclaimer: string;
+}
+
+export interface PortfolioPerformance {
+  /** Net portfolio change over 24h in USD */
+  performance24hUsd: number;
+  /** Net portfolio change over 24h in percentage */
+  performance24hPercent: number;
+  /** Cost basis status for the aggregate portfolio */
+  costBasisStatus: CostBasisStatus;
+  /** Total cost basis in USD if determinable */
+  totalCostBasisUsd?: number;
+  /** Unrealized net gain/loss if determinable */
+  unrealizedGainLossUsd?: number;
+  /** Unrealized net gain/loss percentage if determinable */
+  unrealizedGainLossPercent?: number;
+  /** Ticker of top 24h gainer */
+  topGainerTicker?: string;
+  /** Top gainer percentage */
+  topGainerPercent?: number;
+  /** Performance note explaining 24h calculation vs historical acquisition */
+  disclaimer: string;
+}
+
+export interface PortfolioMilestone {
+  id: string;
+  title: string;
+  category: 'tier' | 'diversification' | 'holding' | 'compliance';
+  achieved: boolean;
+  achievedAt?: string;
+  description: string;
+  evidence?: string;
+}
+
+export interface HoldingHistoryItem {
+  mint: string;
+  ticker: string;
+  companyName: string;
+  firstAcquiredDate?: string;
+  estimatedHoldingDays: number;
+  transactionCount: number;
+  activityStatus: 'active_holding' | 'recent_settlement';
+}
+
+export interface PortfolioSectorAllocation {
+  sector: string;
+  valueUsd: number;
+  percentage: number;
+  assetCount: number;
+}
+
 export interface Holding {
   /** Tokenized equity asset specification */
   asset: TokenizedEquity;
@@ -122,6 +285,8 @@ export interface Holding {
   valueUsd: number;
   /** Percentage of the total tokenized equity portfolio (0 - 100) */
   allocationPercentage: number;
+  /** Calculated performance metrics (24h delta, cost basis where reliable) */
+  performance?: HoldingPerformance;
   /** Date/time when first tokens were acquired in this account */
   firstAcquiredAt?: string;
   /** Specific associated token account address (ATA) on Solana */
@@ -145,6 +310,8 @@ export interface Transaction {
   symbol: string;
   /** Token quantity moved */
   amount: number;
+  /** Approximate USD value at transaction time or current valuation */
+  valueUsd?: number;
   /** Transaction confirmation tier */
   status: 'confirmed' | 'finalized';
   /** Counterparty Solana address if applicable */
@@ -163,8 +330,14 @@ export interface Portfolio {
   walletAddress: string;
   /** Verified tokenized equity holdings found */
   holdings: Holding[];
+  /** Consolidated holdings grouped by underlying security */
+  consolidatedHoldings: ConsolidatedUnderlyingHolding[];
+  /** Unknown / unrecognized / unsupported tokens found in wallet (visible, never falsely classified) */
+  unknownTokens: UnknownTokenHolding[];
   /** Total calculated USD value of verified tokenized equities */
   totalValueUsd: number;
+  /** Total quantity of shares held across all verified equities */
+  totalSharesCount: number;
   /** Count of distinct verified tokenized equity assets */
   totalAssetsCount: number;
   /** Non-equity SPL tokens found in wallet (not counted toward passport) */
@@ -173,6 +346,20 @@ export interface Portfolio {
   solBalance: number;
   /** SOL balance converted to USD */
   solBalanceUsd: number;
+  /** Combined portfolio worth (Verified Equities + SOL Reserve) */
+  totalNetWorthUsd: number;
+  /** Aggregate portfolio performance (24h market delta, cost basis disclosures) */
+  performance: PortfolioPerformance;
+  /** Pricing freshness information (live vs delayed vs estimated) */
+  pricingFreshness: PricingFreshness;
+  /** Breakdown by economic sector */
+  sectorAllocation: PortfolioSectorAllocation[];
+  /** Portfolio milestone achievements */
+  milestones: PortfolioMilestone[];
+  /** Holding history timeline & acquisition cadence */
+  holdingHistory: HoldingHistoryItem[];
+  /** Normalized recent transaction activity */
+  recentTransactions: Transaction[];
   /** Diversification index (0 - 100 based on Herfindahl-Hirschman index across assets & issuers) */
   diversificationIndex: number;
   /** Breakdown by equity token issuer */
@@ -198,6 +385,10 @@ export type PassportTier =
 export interface Passport {
   /** Unique deterministic credential ID: ONF-SOL-[shortAddress]-[checksum] */
   passportId: string;
+  /** Onfolio human-readable Profile Handle, e.g. @allocator-8x9p */
+  profileHandle: string;
+  /** Complete Onfolio Profile Identifier, e.g. onfolio.id/@allocator-8x9p */
+  profileIdentifier: string;
   /** Solana wallet address owner of the passport */
   walletAddress: string;
   /** Passport tier achieved based on verified onchain holdings */
@@ -212,6 +403,8 @@ export interface Passport {
   validUntil: string;
   /** Number of distinct tokenized equities verified */
   holdingCount: number;
+  /** Total number of supported tokenized securities in the Onfolio registry */
+  supportedAssetsTotal: number;
   /** Total verified tokenized equity balance in USD */
   verifiedEquityValueUsd: number;
   /** List of verified issuers represented in portfolio */
@@ -224,6 +417,46 @@ export interface Passport {
   status: 'ACTIVE' | 'PENDING_SCAN' | 'EMPTY_PORTFOLIO';
   /** Deterministic 8-char security checksum */
   checksum: string;
+  /** Explicit flag: true ONLY if verified against live Solana Mainnet RPC */
+  isVerifiedOnchain: boolean;
+  /** Configured verification data source label */
+  verificationDataSource: string;
+  /** Earliest discovered tokenized equity position onchain */
+  firstDiscoveredAsset?: {
+    ticker: string;
+    companyName: string;
+    date?: string;
+    mint: string;
+  };
+  /** Longest-held supported tokenized asset in wallet */
+  longestHeldAsset?: {
+    ticker: string;
+    companyName: string;
+    daysHeld: number;
+    acquiredDate?: string;
+    mint: string;
+  };
+  /** Significant capital milestone achieved (e.g. $10k+ Accredited Scale) */
+  portfolioValueMilestone?: {
+    label: string;
+    achievedValueUsd: number;
+    date?: string;
+  };
+  /** Clear partition for self-reported or unverified parameters (e.g., custom user nicknames, unindexed claims) */
+  selfReportedData: Array<{
+    label: string;
+    value: string;
+    reason: string;
+  }>;
+  /** Cryptographic proof summary for immediate inspection */
+  evidenceSummary: {
+    solanaSlot?: number;
+    sha256Hash: string;
+    verifiedHoldingsCount: number;
+    transferAgentJurisdictions: string[];
+    tokenStandards: string[];
+    custodyModel: string;
+  };
 }
 
 export interface VerificationRecord {

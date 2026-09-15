@@ -9,6 +9,8 @@ import { calculatePortfolio } from '../services/portfolio/calculator';
 import { generatePassport } from '../services/passport/generator';
 import { DEV_SAMPLE_WALLETS } from '../services/solana/devAdapter';
 import { getSolanaDataProvider } from '../services/solana/providerFactory';
+import { runOnchainPipeline } from '../services/solana/pipeline';
+import { NormalizedOnchainData } from '../services/solana/types';
 import { createVerificationRecord } from '../services/verification/verifier';
 import {
   classifySolanaAddress,
@@ -38,13 +40,16 @@ interface AppContextType {
   portfolio: Portfolio | null;
   passport: Passport | null;
   verificationRecord: VerificationRecord | null;
+  normalizedData: NormalizedOnchainData | null;
   preferences: UserPreferences;
   isScanning: boolean;
   scanError: string | null;
   isVerificationModalOpen: boolean;
   isSettingsModalOpen: boolean;
   isConnectWalletModalOpen: boolean;
+  isRegistryModalOpen: boolean;
   setConnectWalletModalOpen: (open: boolean) => void;
+  setRegistryModalOpen: (open: boolean) => void;
   scanAddress: (
     targetAddress: string,
     sourceLabel?: string,
@@ -85,12 +90,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
   const [passport, setPassport] = useState<Passport | null>(null);
   const [verificationRecord, setVerificationRecord] = useState<VerificationRecord | null>(null);
+  const [normalizedData, setNormalizedData] = useState<NormalizedOnchainData | null>(null);
   const [preferences, setPreferences] = useState<UserPreferences>(DEFAULT_PREFERENCES);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [isVerificationModalOpen, setVerificationModalOpen] = useState<boolean>(false);
   const [isSettingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
   const [isConnectWalletModalOpen, setConnectWalletModalOpen] = useState<boolean>(false);
+  const [isRegistryModalOpen, setRegistryModalOpen] = useState<boolean>(false);
 
   const resetScannerState = useCallback(() => {
     setScannerState('idle');
@@ -149,39 +156,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const connectorName = connectorNameOverride || (entryMethod === 'connected' ? wallet.connectorName : 'Public Ledger Scan');
 
       try {
-        // 1. Obtain data provider (Live Solana RPC or Dev Adapter)
+        // 1. Obtain data provider (Live Solana RPC/Indexer or Dev Sandbox Adapter)
         const provider = getSolanaDataProvider(
           shouldUseDev,
           preferences.rpcEndpoint
         );
 
-        // 2. Fetch Solana data concurrently
-        const [tokenAccounts, solBalance, currentSlot] = await Promise.all([
-          provider.fetchTokenAccounts(cleanAddress),
-          provider.fetchSolBalance(cleanAddress),
-          provider.getCurrentSlot().catch(() => 284152890),
-        ]);
+        // 2. Execute full Onchain Pipeline:
+        // PUBLIC WALLET ADDRESS → SOLANA DATA PROVIDER → RAW DATA → NORMALIZED ONCHAIN DATA → ASSET REGISTRY → PORTFOLIO ENGINE
+        const pipelineResult = await runOnchainPipeline(cleanAddress, provider);
+        const { normalizedData: normData, portfolio: calculatedPortfolio, slot: currentSlot } = pipelineResult;
 
-        // 3. Asset recognition & Portfolio calculation
-        const calculatedPortfolio = calculatePortfolio(
-          cleanAddress,
-          tokenAccounts,
-          solBalance,
-          provider.isMock,
-          provider.name
-        );
-
-        // 4. Generate Passport Credential
+        // 3. Generate Passport Credential from calculated portfolio
         const generatedPassport = generatePassport(calculatedPortfolio);
 
-        // 5. Generate Verification Record with cryptographic hash
+        // 4. Generate Verification Record with cryptographic hash and onchain evidence
         const record = await createVerificationRecord(
           generatedPassport,
           calculatedPortfolio,
           currentSlot
         );
 
-        // 6. Update state
+        // 5. Update state
+        setNormalizedData(normData);
         setPortfolio(calculatedPortfolio);
         setPassport(generatedPassport);
         setVerificationRecord(record);
@@ -230,64 +227,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         });
 
-        // 7. Resolve Scanner State
-        if (calculatedPortfolio.holdings.length === 0) {
+        // 6. Resolve Scanner State based on normalized holdings and warnings
+        if (normData.partialWarnings && normData.partialWarnings.length > 0 && calculatedPortfolio.holdings.length > 0) {
+          setScannerState('partial data');
+          setScanError(`Partial sync completed with notices: ${normData.partialWarnings.join(', ')}`);
+        } else if (calculatedPortfolio.holdings.length === 0) {
           setScannerState('no supported assets');
+          setScanError(null);
         } else {
           setScannerState('success');
+          setScanError(null);
         }
       } catch (err: unknown) {
-        console.error('Scan error:', err);
+        console.error('Blockchain data provider error:', err);
         const errMsg = err instanceof Error ? err.message : String(err);
 
-        // If public RPC fails with 403 or rate limits, gracefully fallback to Sandbox simulation
-        if (errMsg.includes('403') || errMsg.includes('rate limit') || errMsg.includes('429')) {
-          console.warn('RPC restricted or rate limited, falling back to Sandbox Adapter');
-          try {
-            const fallbackProvider = getSolanaDataProvider(true);
-            const [tokenAccounts, solBalance, currentSlot] = await Promise.all([
-              fallbackProvider.fetchTokenAccounts(cleanAddress),
-              fallbackProvider.fetchSolBalance(cleanAddress),
-              fallbackProvider.getCurrentSlot(),
-            ]);
-            const calculatedPortfolio = calculatePortfolio(
-              cleanAddress,
-              tokenAccounts,
-              solBalance,
-              true,
-              'Sandbox Simulation (Live RPC Fallback)'
-            );
-            const generatedPassport = generatePassport(calculatedPortfolio);
-            const record = await createVerificationRecord(
-              generatedPassport,
-              calculatedPortfolio,
-              currentSlot
-            );
-            setPortfolio(calculatedPortfolio);
-            setPassport(generatedPassport);
-            setVerificationRecord(record);
-            setWallet((prev) => ({
-              ...prev,
-              address: cleanAddress,
-              entryMethod,
-              connectorName,
-              connected: entryMethod === 'connected',
-              isReadOnlyScan: entryMethod === 'scanned',
-              label: sourceLabel || (entryMethod === 'connected' ? prev.label : 'Scanned Address'),
-            }));
-            setPreferences((prev) => ({ ...prev, useDevAdapter: true }));
-            setScannerState(calculatedPortfolio.holdings.length === 0 ? 'no supported assets' : 'partial data');
-            setScanError(
-              'Public RPC experienced network throttling. Ingested via Sandbox Simulation.'
-            );
-            return;
-          } catch (fallbackErr) {
-            console.error('Fallback error:', fallbackErr);
-          }
-        }
+        // Clear verified holdings to ensure non-fabrication
+        setNormalizedData(null);
+        setPortfolio(null);
+        setPassport(null);
+        setVerificationRecord(null);
 
+        // Set explicit network/provider error state with actionable guidance
         setScannerState('network error');
-        setScanError(errMsg);
+        if (errMsg.includes('429') || errMsg.includes('rate limit') || errMsg.includes('403')) {
+          setScanError(
+            'Solana RPC rate limit reached. Please configure a custom RPC endpoint in Settings or switch to Sandbox mode to explore demo portfolios.'
+          );
+        } else if (errMsg.includes('unavailable') || errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError')) {
+          setScanError(
+            `Solana data provider is unreachable: ${errMsg}. Check your network, configure a dedicated RPC in Settings, or use Sandbox mode.`
+          );
+        } else {
+          setScanError(`Onchain data retrieval error: ${errMsg}`);
+        }
       } finally {
         setIsScanning(false);
       }
@@ -351,6 +324,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPortfolio(null);
     setPassport(null);
     setVerificationRecord(null);
+    setNormalizedData(null);
     setScannerState('idle');
     setScanError(null);
   }, []);
@@ -418,13 +392,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     portfolio,
     passport,
     verificationRecord,
+    normalizedData,
     preferences,
     isScanning,
     scanError,
     isVerificationModalOpen,
     isSettingsModalOpen,
     isConnectWalletModalOpen,
+    isRegistryModalOpen,
     setConnectWalletModalOpen,
+    setRegistryModalOpen,
     scanAddress,
     connectWallet,
     disconnect,
