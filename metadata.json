@@ -1,0 +1,6 @@
+{
+  "name": "Onfolio",
+  "description": "Turn your onchain tokenized-equity activity into a clear, verifiable and portable investment passport on Solana.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

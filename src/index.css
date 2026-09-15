@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --color-brand-primary: #D26E46;
+    --color-brand-hover: #BF5D35;
+    --color-brand-active: #A94E27;
+    --color-brand-tint: #FAF0EB;
+    --color-brand-border: #F1D8CB;
+
+    --color-canvas: #FAF8F5;
+    --color-surface: #FFFFFF;
+    --color-surface-subtle: #F4F0EB;
+    --color-surface-elevated: #FFFFFF;
+    --color-border-warm: #E8E3DC;
+    --color-border-subtle: #F0ECE5;
+
+    --color-ink-primary: #191F28;
+    --color-ink-secondary: #4A5361;
+    --color-ink-muted: #798596;
+    --color-ink-faint: #A5AFBD;
+
+    --color-success: #2A7954;
+    --color-success-tint: #EEF7F2;
+    --color-success-border: #C8E5D7;
+
+    --color-warning: #B87002;
+    --color-warning-tint: #FEF8E7;
+    --color-warning-border: #FCE6B5;
+
+    --color-error: #C13B2E;
+    --color-error-tint: #FDF2F1;
+    --color-error-border: #F7C8C4;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-ink-primary);
+    font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  code, pre, .font-mono {
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+}
