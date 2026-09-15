@@ -4,6 +4,11 @@
  */
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import {
+  authenticateWithGoogle,
+  logoutFirebase,
+  onAuthStateSubscription,
+} from '../services/auth/firebaseAuth';
 
 export interface User {
   email: string;
@@ -20,7 +25,7 @@ interface AuthContextType {
   signUpWithEmail: (email: string, name?: string) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
   signInAsGuest: () => void;
-  signOut: () => void;
+  signOut: () => Promise<void>;
 }
 
 const STORAGE_KEY = 'onfolio_auth_user_v1';
@@ -31,18 +36,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // Restore stored session on boot
+  // Subscribe to real Firebase Auth state & fall back to local storage
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        setUser(JSON.parse(stored));
+    let isSubscribed = true;
+
+    // Listen to Firebase auth state changes (persists Google account sessions)
+    const unsubscribeFirebase = onAuthStateSubscription((fbUser) => {
+      if (!isSubscribed) return;
+
+      if (fbUser) {
+        setUser(fbUser);
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(fbUser));
+        } catch {
+          // ignore
+        }
+        setIsLoading(false);
+      } else {
+        // If not authenticated via Firebase, check if an email or guest session is saved
+        try {
+          const stored = localStorage.getItem(STORAGE_KEY);
+          if (stored) {
+            const parsed = JSON.parse(stored);
+            if (parsed && parsed.provider !== 'google') {
+              setUser(parsed);
+            }
+          }
+        } catch {
+          // ignore
+        }
+        setIsLoading(false);
       }
-    } catch {
-      // Ignore parse errors
-    } finally {
-      setIsLoading(false);
-    }
+    });
+
+    return () => {
+      isSubscribed = false;
+      unsubscribeFirebase();
+    };
   }, []);
 
   const saveUserSession = (newUser: User) => {
@@ -56,8 +86,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signInWithEmail = async (email: string) => {
     setIsLoading(true);
-    // Simulate authentication processing
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 400));
     const cleanEmail = email.trim().toLowerCase();
     const newUser: User = {
       email: cleanEmail,
@@ -70,7 +99,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signUpWithEmail = async (email: string, name?: string) => {
     setIsLoading(true);
-    await new Promise((r) => setTimeout(r, 650));
+    await new Promise((r) => setTimeout(r, 450));
     const cleanEmail = email.trim().toLowerCase();
     const newUser: User = {
       email: cleanEmail,
@@ -83,14 +112,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const signInWithGoogle = async () => {
     setIsLoading(true);
-    await new Promise((r) => setTimeout(r, 700));
-    const newUser: User = {
-      email: 'investor@onfolio.network',
-      name: 'Onfolio Investor',
-      provider: 'google',
-    };
-    saveUserSession(newUser);
-    setIsLoading(false);
+    try {
+      const googleUser = await authenticateWithGoogle();
+      saveUserSession(googleUser);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const signInAsGuest = () => {
@@ -102,12 +129,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     saveUserSession(newUser);
   };
 
-  const signOut = () => {
-    setUser(null);
+  const signOut = async () => {
+    setIsLoading(true);
     try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // ignore
+      await logoutFirebase();
+    } finally {
+      setUser(null);
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+      setIsLoading(false);
     }
   };
 

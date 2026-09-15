@@ -26,8 +26,18 @@ const OnfolioMainContent: React.FC = () => {
   const { isAuthenticated, isLoading } = useAuth();
   const [activeTab, setActiveTab] = useState<'passport' | 'holdings' | 'audit'>('passport');
 
+  // While Firebase or storage checks for an existing session, display clean loader
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-[#FAF8F5] flex flex-col items-center justify-center space-y-3">
+        <div className="w-7 h-7 border-2 border-[#D26E46] border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-xs font-mono text-[#798596] tracking-wide">Restoring session...</p>
+      </div>
+    );
+  }
+
   // Display clean initial landing screen if not signed in
-  if (!isAuthenticated && !isLoading) {
+  if (!isAuthenticated) {
     return <AuthLanding />;
   }
 
