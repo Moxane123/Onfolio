@@ -3,6 +3,8 @@
  * Core Type Definitions & Interfaces
  */
 
+import { PrivacyControlsConfig } from './privacy';
+
 export type WalletEntryMethod = 'connected' | 'scanned';
 
 export type ScannerState =
@@ -16,6 +18,9 @@ export type ScannerState =
   | 'no supported assets'
   | 'partial data';
 
+export type WalletSourceType = 'solana_connected' | 'solana_address' | 'brokerage_future' | 'evm_future';
+export type SupportedChain = 'solana' | 'ethereum_future' | 'brokerage_future';
+
 export interface DiscoveredWallet {
   /** Unique account identity */
   id: string;
@@ -25,12 +30,16 @@ export interface DiscoveredWallet {
   entryMethod: WalletEntryMethod;
   /** Name of the connector or ingestion method (e.g. 'Phantom', 'Solflare', 'Backpack', 'Public Ledger Scan') */
   connectorName: string;
-  /** Custom user or default label */
+  /** Custom user or default label (e.g., 'Primary', 'Trading', 'Cold Storage') */
   label: string;
   /** ISO timestamp of discovery */
   addedAt: string;
-  /** Whether this is currently active in the primary view */
+  /** Whether this is currently the primary identity in the multi-wallet passport */
   isPrimary: boolean;
+  /** Source classification for future multi-ledger/brokerage compatibility */
+  sourceType?: WalletSourceType;
+  /** Chain classification */
+  chain?: SupportedChain;
   /** Summary of recognized holdings if available */
   portfolioSummary?: {
     verifiedValueUsd: number;
@@ -136,6 +145,8 @@ export interface ConsolidatedUnderlyingHolding {
     verificationStatus: AssetVerificationStatus;
     prospectusUrl?: string;
     custodian: string;
+    walletAddress?: string;
+    walletLabel?: string;
   }>;
   issuers: string[];
 }
@@ -293,6 +304,10 @@ export interface Holding {
   tokenAccountAddress: string;
   /** Token standard indicator */
   isToken2022: boolean;
+  /** Wallet address where this holding resides */
+  walletAddress?: string;
+  /** User-defined wallet label where this holding resides (e.g. 'Primary', 'Trading', 'Cold Storage') */
+  walletLabel?: string;
 }
 
 export interface Transaction {
@@ -326,8 +341,21 @@ export interface IssuerConcentration {
 }
 
 export interface Portfolio {
-  /** Scanned or connected wallet address */
+  /** Primary scanned or connected wallet address */
   walletAddress: string;
+  /** Total count of verified wallets contributing to this portfolio */
+  walletCount?: number;
+  /** Summary of contributing wallets across this unified portfolio */
+  contributingWallets?: Array<{
+    id: string;
+    address: string;
+    label: string;
+    entryMethod: WalletEntryMethod;
+    connectorName: string;
+    isPrimary: boolean;
+    holdingCount: number;
+    valueUsd: number;
+  }>;
   /** Verified tokenized equity holdings found */
   holdings: Holding[];
   /** Consolidated holdings grouped by underlying security */
@@ -401,6 +429,16 @@ export interface Passport {
   issuanceDate: string;
   /** Recommended validity re-check date */
   validUntil: string;
+  /** Number of verified wallets contributing to this passport */
+  walletCount?: number;
+  /** Summary of contributing wallets (kept private / for owner inspection) */
+  contributingWalletsSummary?: Array<{
+    id: string;
+    label: string;
+    shortAddress: string;
+    holdingCount: number;
+    valueUsd: number;
+  }>;
   /** Number of distinct tokenized equities verified */
   holdingCount: number;
   /** Total number of supported tokenized securities in the Onfolio registry */
@@ -493,6 +531,8 @@ export type PrivacyMode = 'public' | 'masked_balances' | 'anonymous_pass';
 export interface UserPreferences {
   /** Privacy masking preference */
   privacyMode: PrivacyMode;
+  /** Granular selective disclosure controls */
+  privacyControls?: PrivacyControlsConfig;
   /** Preferred display fiat / currency */
   selectedCurrency: 'USD' | 'EUR' | 'SOL';
   /** Custom RPC endpoint URL override */

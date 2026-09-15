@@ -21,6 +21,8 @@ import { VerificationDrawer } from './components/passport/VerificationDrawer';
 import { SettingsModal } from './components/settings/SettingsModal';
 import { AssetRegistryModal } from './components/registry/AssetRegistryModal';
 import { AuthLanding } from './components/auth/AuthLanding';
+import { PublicPassportScreen } from './components/passport/PublicPassportScreen';
+import { getSharedPassportById, createSharedPassportProfile, DEFAULT_PRIVACY_CONTROLS } from './services/privacy/sharingEngine';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AppProvider, useApp } from './context/AppContext';
 import { LayoutDashboard, ShieldCheck, Layers, FileCheck2, ArrowRight } from 'lucide-react';
@@ -40,6 +42,18 @@ const OnfolioMainContent: React.FC = () => {
     wallet,
   } = useApp();
 
+  // Public shared passport route detection: /passport/<public-id> or ?passport=<public-id>
+  const [publicSharedId, setPublicSharedId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    const pathname = window.location.pathname;
+    const match = pathname.match(/\/passport\/([^/]+)/);
+    if (match && match[1]) {
+      return match[1];
+    }
+    const params = new URLSearchParams(window.location.search);
+    return params.get('passport');
+  });
+
   // Read initial view from URL search query (e.g. ?view=passport or ?view=dashboard)
   const [activeTab, setActiveTab] = useState<'passport' | 'dashboard' | 'holdings' | 'audit'>(() => {
     if (typeof window !== 'undefined') {
@@ -53,16 +67,98 @@ const OnfolioMainContent: React.FC = () => {
     return 'passport';
   });
 
-  // Sync active view to URL for shareability without full reload
+  // Handle browser popstate navigation for /passport/<id>
   useEffect(() => {
-    if (typeof window !== 'undefined' && portfolio?.walletAddress) {
+    const handlePopState = () => {
+      const pathname = window.location.pathname;
+      const match = pathname.match(/\/passport\/([^/]+)/);
+      if (match && match[1]) {
+        setPublicSharedId(match[1]);
+      } else {
+        const params = new URLSearchParams(window.location.search);
+        setPublicSharedId(params.get('passport'));
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  // Sync active view to URL for shareability without full reload when not on a public route
+  useEffect(() => {
+    if (typeof window !== 'undefined' && !publicSharedId && portfolio?.walletAddress) {
       const params = new URLSearchParams(window.location.search);
       params.set('address', portfolio.walletAddress);
       params.set('view', activeTab);
       const newUrl = `${window.location.pathname}?${params.toString()}`;
       window.history.replaceState({}, '', newUrl);
     }
-  }, [activeTab, portfolio?.walletAddress]);
+  }, [activeTab, portfolio?.walletAddress, publicSharedId]);
+
+  // Navigate to public shared page
+  const handleOpenSharedPage = (publicId: string) => {
+    setPublicSharedId(publicId);
+    if (typeof window !== 'undefined') {
+      const newUrl = `/passport/${publicId}`;
+      window.history.pushState({}, '', newUrl);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  // Exit public passport view back to dashboard
+  const handleExitSharedPage = () => {
+    setPublicSharedId(null);
+    if (typeof window !== 'undefined') {
+      const newUrl = window.location.pathname.startsWith('/passport/') ? '/' : window.location.pathname;
+      window.history.pushState({}, '', newUrl);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  // If viewing a public passport page (/passport/<public-id>), render the standalone public view
+  if (publicSharedId) {
+    // Look up persisted profile or synthesize from active session if current user is owner
+    let sharedProfile = getSharedPassportById(publicSharedId);
+
+    if (!sharedProfile && passport && portfolio) {
+      // Fallback: If viewing their newly shared ID, generate the profile dynamically
+      sharedProfile = createSharedPassportProfile(
+        passport,
+        portfolio,
+        'public',
+        DEFAULT_PRIVACY_CONTROLS
+      );
+    }
+
+    if (sharedProfile) {
+      const isOwner = wallet?.address?.toLowerCase() === sharedProfile.ownerWalletAddress?.toLowerCase();
+      return (
+        <PublicPassportScreen
+          sharedProfile={sharedProfile}
+          onBackToApp={handleExitSharedPage}
+          isOwner={isOwner}
+        />
+      );
+    }
+
+    // If ID not found
+    return (
+      <div className="min-h-screen bg-[#FAF8F5] flex flex-col items-center justify-center p-6 text-center space-y-4">
+        <div className="w-12 h-12 rounded-2xl bg-[#FAF0EB] text-[#D26E46] flex items-center justify-center font-bold text-lg">
+          404
+        </div>
+        <h2 className="text-lg font-bold text-[#191F28]">Public Passport Not Found</h2>
+        <p className="text-xs text-[#798596] max-w-sm">
+          The requested public passport identifier (<code className="font-mono">{publicSharedId}</code>) may have expired, been revoked by its owner, or the link is incorrect.
+        </p>
+        <button
+          onClick={handleExitSharedPage}
+          className="px-4 py-2 bg-[#191F28] hover:bg-[#2A3542] text-white text-xs font-semibold rounded-xl transition-all cursor-pointer"
+        >
+          Return to Onfolio App
+        </button>
+      </div>
+    );
+  }
 
   // While Firebase or storage checks for an existing session, display clean loader
   if (isLoading) {
@@ -207,6 +303,7 @@ const OnfolioMainContent: React.FC = () => {
               onOpenAudit={() => setVerificationModalOpen(true)}
               onSwitchToDashboard={() => handleTabChange('dashboard')}
               onOpenRegistryModal={() => setRegistryModalOpen(true)}
+              onViewSharedPage={handleOpenSharedPage}
             />
           ) : (
             <div className="p-8 text-center bg-white rounded-3xl border border-[#E8E3DC]">

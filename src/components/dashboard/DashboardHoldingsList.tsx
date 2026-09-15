@@ -31,6 +31,13 @@ import {
 } from 'lucide-react';
 import { ConsolidatedUnderlyingHolding, Holding, Portfolio, UserPreferences } from '../../types';
 import { Badge } from '../ui/Badge';
+import { VerificationBadge } from '../verification/VerificationBadge';
+import { VerificationInspectorModal } from '../verification/VerificationInspectorModal';
+import {
+  buildHoldingVerificationEvidence,
+  determineHoldingVerificationState,
+} from '../../services/verification/evidenceEngine';
+import { HoldingVerificationEvidence } from '../../types/verification';
 
 interface DashboardHoldingsListProps {
   portfolio: Portfolio;
@@ -45,8 +52,15 @@ export const DashboardHoldingsList: React.FC<DashboardHoldingsListProps> = ({
 }) => {
   const [viewMode, setViewMode] = useState<'consolidated' | 'mints'>('consolidated');
   const [searchQuery, setSearchQuery] = useState('');
+  const [inspectEvidence, setInspectEvidence] = useState<HoldingVerificationEvidence | null>(null);
 
   const isMasked = preferences.privacyMode === 'masked_balances';
+
+  const currentVerification = determineHoldingVerificationState({
+    isMockData: portfolio.isMockData,
+    updatedAt: portfolio.updatedAt,
+    isPricingStale: portfolio.pricingFreshness?.isStale,
+  });
 
   // Filter consolidated holdings
   const filteredConsolidated = portfolio.consolidatedHoldings.filter((ch) => {
@@ -172,9 +186,26 @@ export const DashboardHoldingsList: React.FC<DashboardHoldingsListProps> = ({
                         <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-[#F4F0EB] text-[#4A5361] font-semibold">
                           {u.ticker}
                         </span>
-                        <Badge variant="success" size="sm" icon={<ShieldCheck className="w-2.5 h-2.5" />}>
-                          Verified
-                        </Badge>
+                        <VerificationBadge
+                          state={currentVerification.state}
+                          size="sm"
+                          interactive={true}
+                          onClick={() => {
+                            const targetHolding = portfolio.holdings.find(
+                              (h) => h.asset.underlyingTicker === u.ticker
+                            );
+                            if (targetHolding) {
+                              setInspectEvidence(
+                                buildHoldingVerificationEvidence(
+                                  targetHolding,
+                                  portfolio,
+                                  portfolio.walletAddress,
+                                  preferences
+                                )
+                              );
+                            }
+                          }}
+                        />
                       </div>
 
                       <div className="flex items-center space-x-2 text-xs text-[#798596] mt-1">
@@ -294,6 +325,21 @@ export const DashboardHoldingsList: React.FC<DashboardHoldingsListProps> = ({
                             Token-2022
                           </span>
                         )}
+                        <VerificationBadge
+                          state={currentVerification.state}
+                          size="sm"
+                          interactive={true}
+                          onClick={() => {
+                            setInspectEvidence(
+                              buildHoldingVerificationEvidence(
+                                holding,
+                                portfolio,
+                                portfolio.walletAddress,
+                                preferences
+                              )
+                            );
+                          }}
+                        />
                       </div>
 
                       <div className="flex items-center space-x-2 text-xs text-[#798596] mt-1 font-mono truncate">
@@ -362,6 +408,13 @@ export const DashboardHoldingsList: React.FC<DashboardHoldingsListProps> = ({
           )
         )}
       </div>
+
+      {/* Holding Verification Evidence Inspector */}
+      <VerificationInspectorModal
+        evidence={inspectEvidence}
+        isOpen={Boolean(inspectEvidence)}
+        onClose={() => setInspectEvidence(null)}
+      />
     </div>
   );
 };

@@ -37,6 +37,8 @@ import {
 import { OnfolioLogoMark } from '../brand/OnfolioLogo';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
+import { VerificationBadge } from '../verification/VerificationBadge';
+import { determineHoldingVerificationState } from '../../services/verification/evidenceEngine';
 
 export const PassportCard: React.FC = () => {
   const {
@@ -102,15 +104,29 @@ export const PassportCard: React.FC = () => {
             Onchain Investment Passport
           </h2>
         </div>
-        <Button
-          id="audit-verify-passport-btn"
-          variant="secondary"
-          size="sm"
-          onClick={() => setVerificationModalOpen(true)}
-          leftIcon={<ShieldCheck className="w-4 h-4 text-[#D26E46]" />}
-        >
-          Audit Proof
-        </Button>
+        <div className="flex items-center space-x-2">
+          <VerificationBadge
+            state={
+              determineHoldingVerificationState({
+                isMockData: portfolio.isMockData,
+                updatedAt: portfolio.updatedAt,
+                isPricingStale: portfolio.pricingFreshness?.isStale,
+              }).state
+            }
+            size="md"
+            interactive={true}
+            onClick={() => setVerificationModalOpen(true)}
+          />
+          <Button
+            id="audit-verify-passport-btn"
+            variant="secondary"
+            size="sm"
+            onClick={() => setVerificationModalOpen(true)}
+            leftIcon={<ShieldCheck className="w-4 h-4 text-[#D26E46]" />}
+          >
+            Audit Proof
+          </Button>
+        </div>
       </div>
 
       {/* The Passport Physical-Style Digital Credential Card */}

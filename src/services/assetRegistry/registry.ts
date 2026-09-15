@@ -265,6 +265,8 @@ export class AssetRegistryService {
         verificationStatus: record?.verificationStatus ?? 'verified',
         prospectusUrl: h.asset.prospectusUrl,
         custodian: h.asset.custodian,
+        walletAddress: h.walletAddress,
+        walletLabel: h.walletLabel,
       });
     }
 

@@ -30,6 +30,14 @@ import { assetRegistry } from '../../services/assetRegistry/registry';
 import { TokenizedAssetRecord, UnderlyingSecurity } from '../../services/assetRegistry/types';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
+import { useApp } from '../../context/AppContext';
+import { VerificationBadge } from '../verification/VerificationBadge';
+import { VerificationInspectorModal } from '../verification/VerificationInspectorModal';
+import {
+  buildHoldingVerificationEvidence,
+  determineHoldingVerificationState,
+} from '../../services/verification/evidenceEngine';
+import { HoldingVerificationEvidence } from '../../types/verification';
 
 interface AssetDetailModalProps {
   mint: string;
@@ -38,11 +46,24 @@ interface AssetDetailModalProps {
 
 export const AssetDetailModal: React.FC<AssetDetailModalProps> = ({ mint, onClose }) => {
   const [copied, setCopied] = useState(false);
+  const [inspectEvidence, setInspectEvidence] = useState<HoldingVerificationEvidence | null>(null);
+
+  const { portfolio, wallet, preferences } = useApp();
 
   const asset: TokenizedAssetRecord | undefined = assetRegistry.getByMint(mint);
   const underlying: UnderlyingSecurity | undefined = asset
     ? assetRegistry.getUnderlyingByTicker(asset.underlyingTicker)
     : undefined;
+
+  const userHolding = portfolio?.holdings.find(
+    (h) => h.asset.mint.toLowerCase() === mint.toLowerCase()
+  );
+
+  const verificationState = determineHoldingVerificationState({
+    isMockData: portfolio?.isMockData ?? false,
+    updatedAt: portfolio?.updatedAt ?? new Date().toISOString(),
+    isPricingStale: portfolio?.pricingFreshness?.isStale,
+  });
 
   const handleCopyMint = () => {
     if (!asset) return;
@@ -142,7 +163,25 @@ export const AssetDetailModal: React.FC<AssetDetailModalProps> = ({ mint, onClos
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#FAF8F5] p-4 rounded-2xl border border-[#EFEAE2]">
             <div>
               <div className="text-[11px] font-mono text-[#798596] uppercase">Verification</div>
-              <div className="mt-1">{getStatusBadge(asset.verificationStatus)}</div>
+              <div className="mt-1">
+                <VerificationBadge
+                  state={userHolding ? verificationState.state : 'unsupported'}
+                  size="sm"
+                  interactive={Boolean(userHolding)}
+                  onClick={() => {
+                    if (userHolding && portfolio) {
+                      setInspectEvidence(
+                        buildHoldingVerificationEvidence(
+                          userHolding,
+                          portfolio,
+                          wallet.address,
+                          preferences
+                        )
+                      );
+                    }
+                  }}
+                />
+              </div>
             </div>
             <div>
               <div className="text-[11px] font-mono text-[#798596] uppercase">Indicative Price</div>
@@ -339,12 +378,41 @@ export const AssetDetailModal: React.FC<AssetDetailModalProps> = ({ mint, onClos
         </div>
 
         {/* Modal Footer */}
-        <div className="px-6 py-4 bg-[#FAF8F5] border-t border-[#F0ECE5] flex justify-end">
+        <div className="px-6 py-4 bg-[#FAF8F5] border-t border-[#F0ECE5] flex items-center justify-between gap-3">
+          {userHolding && portfolio ? (
+            <button
+              onClick={() => {
+                setInspectEvidence(
+                  buildHoldingVerificationEvidence(
+                    userHolding,
+                    portfolio,
+                    wallet.address,
+                    preferences
+                  )
+                );
+              }}
+              className="px-4 py-2 rounded-xl bg-[#191F28] hover:bg-[#2A3542] text-white text-xs font-semibold flex items-center space-x-2 transition-all cursor-pointer shadow-xs"
+            >
+              <ShieldCheck className="w-4 h-4 text-[#D26E46]" />
+              <span>Inspect Holding Evidence</span>
+            </button>
+          ) : (
+            <div className="text-xs text-[#798596] font-mono">
+              Not currently held in this connected wallet
+            </div>
+          )}
           <Button variant="secondary" onClick={onClose}>
             Close Inspector
           </Button>
         </div>
       </div>
+
+      {/* Holding Evidence Inspector Sub-Modal */}
+      <VerificationInspectorModal
+        evidence={inspectEvidence}
+        isOpen={Boolean(inspectEvidence)}
+        onClose={() => setInspectEvidence(null)}
+      />
     </div>
   );
 };

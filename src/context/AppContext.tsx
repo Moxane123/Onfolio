@@ -1,17 +1,25 @@
 /**
  * Onfolio — Application State Context
- * Orchestrates wallet discovery, Solana data fetching, asset recognition,
- * portfolio calculation, passport generation, and verification proofs.
+ * Orchestrates multi-wallet discovery, Solana data fetching, asset recognition,
+ * portfolio aggregation, passport generation, and verification proofs.
+ *
+ * Mandate:
+ * "One person may have: a main wallet, a trading wallet, a cold wallet,
+ * another wallet used for a different application. Onfolio should allow these
+ * to contribute to one portfolio."
  */
 
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { calculatePortfolio } from '../services/portfolio/calculator';
+import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { generatePassport } from '../services/passport/generator';
 import { DEV_SAMPLE_WALLETS } from '../services/solana/devAdapter';
 import { getSolanaDataProvider } from '../services/solana/providerFactory';
 import { runOnchainPipeline } from '../services/solana/pipeline';
-import { NormalizedOnchainData } from '../services/solana/types';
+import { NormalizedOnchainData, RawTokenAccount } from '../services/solana/types';
 import { createVerificationRecord } from '../services/verification/verifier';
+import {
+  aggregateMultiWalletPortfolio,
+  WalletOnchainDataPayload,
+} from '../services/portfolio/multiWalletAggregator';
 import {
   classifySolanaAddress,
   connectReadonlyWallet,
@@ -26,11 +34,26 @@ import {
   Portfolio,
   PrivacyMode,
   ScannerState,
+  Transaction,
   UserPreferences,
   VerificationRecord,
   Wallet,
   WalletEntryMethod,
 } from '../types';
+import { PrivacyControlsConfig } from '../types/privacy';
+import { loadUserPrivacyControls, saveUserPrivacyControls } from '../services/privacy/sharingEngine';
+
+const STORAGE_WALLETS_KEY = 'onfolio_wallets_v2';
+
+interface CachedPipelineResult {
+  normData: NormalizedOnchainData;
+  tokenAccounts: RawTokenAccount[];
+  solBalance: number;
+  transactions: Transaction[];
+  isMockData: boolean;
+  dataSource: string;
+  slot: number;
+}
 
 interface AppContextType {
   wallet: Wallet;
@@ -48,8 +71,12 @@ interface AppContextType {
   isSettingsModalOpen: boolean;
   isConnectWalletModalOpen: boolean;
   isRegistryModalOpen: boolean;
+  isAddWalletModalOpen: boolean;
+  isWalletManagerOpen: boolean;
   setConnectWalletModalOpen: (open: boolean) => void;
   setRegistryModalOpen: (open: boolean) => void;
+  setAddWalletModalOpen: (open: boolean) => void;
+  setWalletManagerOpen: (open: boolean) => void;
   scanAddress: (
     targetAddress: string,
     sourceLabel?: string,
@@ -57,12 +84,22 @@ interface AppContextType {
     entryMethod?: WalletEntryMethod,
     connectorName?: string
   ) => Promise<void>;
+  addWallet: (
+    targetAddress: string,
+    label: string,
+    entryMethod?: WalletEntryMethod,
+    connectorName?: string,
+    simulate?: boolean
+  ) => Promise<void>;
+  renameWallet: (walletId: string, newLabel: string) => void;
+  removeWallet: (walletId: string) => Promise<void>;
+  setPrimaryWallet: (walletId: string) => Promise<void>;
   connectWallet: (providerId?: string, simulate?: boolean) => Promise<void>;
   disconnect: () => Promise<void>;
   selectWallet: (walletId: string) => Promise<void>;
-  removeWallet: (walletId: string) => void;
   resetScannerState: () => void;
   setPrivacyMode: (mode: PrivacyMode) => void;
+  updatePrivacyControls: (controls: Partial<PrivacyControlsConfig>) => void;
   setUseDevAdapter: (enabled: boolean) => void;
   setRpcEndpoint: (endpoint: string) => void;
   setVerificationModalOpen: (open: boolean) => void;
@@ -84,7 +121,17 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [wallet, setWallet] = useState<Wallet>(createInitialWalletState());
-  const [discoveredWallets, setDiscoveredWallets] = useState<DiscoveredWallet[]>([]);
+  const [discoveredWallets, setDiscoveredWallets] = useState<DiscoveredWallet[]>(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_WALLETS_KEY);
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch {
+      // Ignore parse failure
+    }
+    return [];
+  });
   const [activeWalletId, setActiveWalletId] = useState<string | null>(null);
   const [scannerState, setScannerState] = useState<ScannerState>('idle');
   const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
@@ -94,10 +141,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [preferences, setPreferences] = useState<UserPreferences>(DEFAULT_PREFERENCES);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [scanError, setScanError] = useState<string | null>(null);
+
+  // Modals
   const [isVerificationModalOpen, setVerificationModalOpen] = useState<boolean>(false);
   const [isSettingsModalOpen, setSettingsModalOpen] = useState<boolean>(false);
   const [isConnectWalletModalOpen, setConnectWalletModalOpen] = useState<boolean>(false);
   const [isRegistryModalOpen, setRegistryModalOpen] = useState<boolean>(false);
+  const [isAddWalletModalOpen, setAddWalletModalOpen] = useState<boolean>(false);
+  const [isWalletManagerOpen, setWalletManagerOpen] = useState<boolean>(false);
+
+  // In-memory cache for onchain pipeline results per address
+  const pipelineCache = useRef<Map<string, CachedPipelineResult>>(new Map());
+
+  // Save discoveredWallets changes to localStorage
+  const persistWallets = useCallback((wallets: DiscoveredWallet[]) => {
+    try {
+      localStorage.setItem(STORAGE_WALLETS_KEY, JSON.stringify(wallets));
+    } catch {
+      // Ignore localStorage failure
+    }
+  }, []);
 
   const resetScannerState = useCallback(() => {
     setScannerState('idle');
@@ -105,8 +168,285 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   /**
-   * Core Scan Workflow:
-   * USER → WALLET ADDRESS → SOLANA DATA → ASSET RECOGNITION → PORTFOLIO → PASSPORT → VERIFICATION
+   * Re-aggregates all discovered wallets into a unified portfolio and passport.
+   */
+  const reaggregateWallets = useCallback(
+    async (walletsToAggregate: DiscoveredWallet[]): Promise<void> => {
+      if (walletsToAggregate.length === 0) {
+        setPortfolio(null);
+        setPassport(null);
+        setVerificationRecord(null);
+        setNormalizedData(null);
+        setScannerState('idle');
+        return;
+      }
+
+      setIsScanning(true);
+      setScannerState('scanning');
+      setScanError(null);
+
+      try {
+        const payloads: WalletOnchainDataPayload[] = [];
+
+        for (const w of walletsToAggregate) {
+          const cacheKey = w.address.toLowerCase();
+          let cached = pipelineCache.current.get(cacheKey);
+
+          if (!cached) {
+            const isKnownSample = DEV_SAMPLE_WALLETS.some(
+              (s) => s.address.toLowerCase() === w.address.toLowerCase()
+            );
+            const shouldUseDev = isKnownSample || preferences.useDevAdapter;
+            const provider = getSolanaDataProvider(shouldUseDev, preferences.rpcEndpoint);
+
+            const pipelineResult = await runOnchainPipeline(w.address, provider);
+            cached = {
+              normData: pipelineResult.normalizedData,
+              tokenAccounts: pipelineResult.rawTokens,
+              solBalance: pipelineResult.solBalance,
+              transactions: pipelineResult.transactions,
+              isMockData: pipelineResult.portfolio.isMockData,
+              dataSource: pipelineResult.portfolio.dataSource,
+              slot: pipelineResult.slot,
+            };
+            pipelineCache.current.set(cacheKey, cached);
+          }
+
+          payloads.push({
+            wallet: w,
+            tokenAccounts: cached.tokenAccounts,
+            solBalance: cached.solBalance,
+            transactions: cached.transactions,
+            isMockData: cached.isMockData,
+            dataSource: cached.dataSource,
+          });
+        }
+
+        // Aggregate across all wallets — avoid double counting, preserve token-level proofs
+        const unifiedPortfolio = aggregateMultiWalletPortfolio(payloads);
+        const generatedPassport = generatePassport(unifiedPortfolio);
+
+        const primaryPayload = payloads.find((p) => p.wallet.isPrimary) || payloads[0];
+        const primarySlot = primaryPayload ? pipelineCache.current.get(primaryPayload.wallet.address.toLowerCase())?.slot : undefined;
+
+        const record = await createVerificationRecord(
+          generatedPassport,
+          unifiedPortfolio,
+          primarySlot
+        );
+
+        setPortfolio(unifiedPortfolio);
+        setPassport(generatedPassport);
+        setVerificationRecord(record);
+        if (primaryPayload) {
+          setNormalizedData(pipelineCache.current.get(primaryPayload.wallet.address.toLowerCase())?.normData || null);
+        }
+
+        // Update each wallet's portfolio summary
+        const updatedWallets = walletsToAggregate.map((w) => {
+          const contrib = unifiedPortfolio.contributingWallets?.find((cw) => cw.id === w.id);
+          return {
+            ...w,
+            portfolioSummary: contrib
+              ? {
+                  verifiedValueUsd: contrib.valueUsd,
+                  holdingCount: contrib.holdingCount,
+                  tier: generatedPassport.tier,
+                }
+              : w.portfolioSummary,
+          };
+        });
+
+        setDiscoveredWallets(updatedWallets);
+        persistWallets(updatedWallets);
+
+        // Update active wallet representation
+        const primaryW = updatedWallets.find((w) => w.isPrimary) || updatedWallets[0];
+        if (primaryW) {
+          setWallet({
+            address: primaryW.address,
+            connected: primaryW.entryMethod === 'connected',
+            entryMethod: primaryW.entryMethod,
+            connectorName: primaryW.connectorName,
+            isReadOnlyScan: primaryW.entryMethod === 'scanned',
+            label: primaryW.label,
+            detectedProviders: [],
+          });
+          setActiveWalletId(primaryW.id);
+        }
+
+        if (unifiedPortfolio.holdings.length === 0) {
+          setScannerState('no supported assets');
+        } else {
+          setScannerState('success');
+        }
+      } catch (err: unknown) {
+        console.error('Multi-wallet aggregation error:', err);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        setScannerState('network error');
+        setScanError(`Onchain data retrieval error: ${errMsg}`);
+      } finally {
+        setIsScanning(false);
+      }
+    },
+    [preferences.useDevAdapter, preferences.rpcEndpoint, persistWallets]
+  );
+
+  /**
+   * Add a new wallet to the unified passport (read-only, no signatures required).
+   */
+  const addWallet = useCallback(
+    async (
+      targetAddress: string,
+      label: string,
+      explicitEntryMethod?: WalletEntryMethod,
+      connectorNameOverride?: string,
+      simulate = false
+    ) => {
+      let cleanAddress = targetAddress.trim();
+      let entryMethod: WalletEntryMethod = explicitEntryMethod || 'scanned';
+      let connectorName = connectorNameOverride || 'Public Ledger Scan';
+
+      // If connecting via extension or simulation
+      if (entryMethod === 'connected' && !cleanAddress) {
+        let connectionResult: { address: string; connectorName: string; entryMethod: WalletEntryMethod };
+        if (simulate) {
+          const provName = connectorNameOverride || 'Phantom (Sandbox)';
+          connectionResult = simulateExtensionConnection(provName);
+        } else {
+          connectionResult = await connectReadonlyWallet();
+        }
+        cleanAddress = connectionResult.address;
+        connectorName = connectionResult.connectorName;
+        entryMethod = connectionResult.entryMethod;
+      }
+
+      const classification = classifySolanaAddress(cleanAddress);
+      if (!classification.isValid) {
+        throw new Error(
+          classification.errorReason ||
+            'Invalid Solana address format. Must be a 32-44 character Base58 string.'
+        );
+      }
+
+      if (classification.isSystemProgram) {
+        throw new Error('This address is a Solana system program ID, not a user equity wallet.');
+      }
+
+      // Check if wallet is already added
+      const existing = discoveredWallets.find(
+        (w) => w.address.toLowerCase() === cleanAddress.toLowerCase()
+      );
+
+      let nextWallets: DiscoveredWallet[];
+      if (existing) {
+        // Update label and details
+        nextWallets = discoveredWallets.map((w) =>
+          w.id === existing.id
+            ? { ...w, label: label || w.label, entryMethod, connectorName }
+            : w
+        );
+      } else {
+        const isFirst = discoveredWallets.length === 0;
+        const newWallet: DiscoveredWallet = {
+          id: `w-${cleanAddress.slice(0, 6)}-${Date.now().toString(36)}`,
+          address: cleanAddress,
+          label: label || (isFirst ? 'Primary' : `Wallet ${discoveredWallets.length + 1}`),
+          entryMethod,
+          connectorName,
+          addedAt: new Date().toISOString(),
+          isPrimary: isFirst,
+          sourceType: entryMethod === 'connected' ? 'solana_connected' : 'solana_address',
+          chain: 'solana',
+        };
+        nextWallets = [...discoveredWallets, newWallet];
+      }
+
+      setDiscoveredWallets(nextWallets);
+      persistWallets(nextWallets);
+
+      // Re-aggregate unified portfolio with the newly added wallet
+      await reaggregateWallets(nextWallets);
+    },
+    [discoveredWallets, persistWallets, reaggregateWallets]
+  );
+
+  /**
+   * Rename a wallet's custom label (e.g. Primary, Trading, Cold Storage).
+   */
+  const renameWallet = useCallback(
+    (walletId: string, newLabel: string) => {
+      const cleanLabel = newLabel.trim();
+      if (!cleanLabel) return;
+
+      const updated = discoveredWallets.map((w) =>
+        w.id === walletId ? { ...w, label: cleanLabel } : w
+      );
+      setDiscoveredWallets(updated);
+      persistWallets(updated);
+
+      // Immediate re-aggregation so holdings immediately reflect new wallet label
+      reaggregateWallets(updated);
+    },
+    [discoveredWallets, persistWallets, reaggregateWallets]
+  );
+
+  /**
+   * Remove a wallet from the Onfolio portfolio view.
+   * "It removes this wallet's data from your Onfolio portfolio view. It does not affect the wallet or blockchain."
+   */
+  const removeWallet = useCallback(
+    async (walletId: string) => {
+      const target = discoveredWallets.find((w) => w.id === walletId);
+      if (target) {
+        pipelineCache.current.delete(target.address.toLowerCase());
+      }
+
+      const remaining = discoveredWallets.filter((w) => w.id !== walletId);
+
+      // If removed wallet was primary, assign primary to first remaining
+      if (remaining.length > 0 && !remaining.some((w) => w.isPrimary)) {
+        remaining[0].isPrimary = true;
+      }
+
+      setDiscoveredWallets(remaining);
+      persistWallets(remaining);
+
+      if (remaining.length === 0) {
+        setPortfolio(null);
+        setPassport(null);
+        setVerificationRecord(null);
+        setNormalizedData(null);
+        setWallet(createInitialWalletState());
+        setActiveWalletId(null);
+        setScannerState('idle');
+      } else {
+        await reaggregateWallets(remaining);
+      }
+    },
+    [discoveredWallets, persistWallets, reaggregateWallets]
+  );
+
+  /**
+   * Designate a wallet as the primary identity for the unified passport.
+   */
+  const setPrimaryWallet = useCallback(
+    async (walletId: string) => {
+      const updated = discoveredWallets.map((w) => ({
+        ...w,
+        isPrimary: w.id === walletId,
+      }));
+      setDiscoveredWallets(updated);
+      persistWallets(updated);
+      setActiveWalletId(walletId);
+
+      await reaggregateWallets(updated);
+    },
+    [discoveredWallets, persistWallets, reaggregateWallets]
+  );
+
+  /**
+   * Scan Address workflow (compatible with hero input and sample switchers).
    */
   const scanAddress = useCallback(
     async (
@@ -117,207 +457,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       connectorNameOverride?: string
     ) => {
       const cleanAddress = targetAddress.trim();
-
-      // State: Validating
-      setScannerState('validating');
-      setScanError(null);
-
-      const classification = classifySolanaAddress(cleanAddress);
-
-      if (!classification.isValid) {
-        setScannerState('invalid address');
-        setScanError(
-          classification.errorReason ||
-            'Invalid Solana address format. Must be a 32-44 character Base58 string.'
-        );
-        return;
-      }
-
-      if (classification.isSystemProgram) {
-        setScannerState('unsupported address');
-        setScanError(
-          classification.errorReason ||
-            'This address is a Solana system program ID, not a user equity wallet.'
-        );
-        return;
-      }
-
-      // State: Scanning
-      setIsScanning(true);
-      setScannerState('scanning');
-      setScanError(null);
-
-      // Check if address is a known demo sample profile
       const isKnownSample = DEV_SAMPLE_WALLETS.some(
         (s) => s.address.toLowerCase() === cleanAddress.toLowerCase()
       );
-      const shouldUseDev = forceDev === true || isKnownSample || preferences.useDevAdapter;
-      const entryMethod: WalletEntryMethod = explicitEntryMethod || (wallet.connected ? 'connected' : 'scanned');
-      const connectorName = connectorNameOverride || (entryMethod === 'connected' ? wallet.connectorName : 'Public Ledger Scan');
-
-      try {
-        // 1. Obtain data provider (Live Solana RPC/Indexer or Dev Sandbox Adapter)
-        const provider = getSolanaDataProvider(
-          shouldUseDev,
-          preferences.rpcEndpoint
-        );
-
-        // 2. Execute full Onchain Pipeline:
-        // PUBLIC WALLET ADDRESS → SOLANA DATA PROVIDER → RAW DATA → NORMALIZED ONCHAIN DATA → ASSET REGISTRY → PORTFOLIO ENGINE
-        const pipelineResult = await runOnchainPipeline(cleanAddress, provider);
-        const { normalizedData: normData, portfolio: calculatedPortfolio, slot: currentSlot } = pipelineResult;
-
-        // 3. Generate Passport Credential from calculated portfolio
-        const generatedPassport = generatePassport(calculatedPortfolio);
-
-        // 4. Generate Verification Record with cryptographic hash and onchain evidence
-        const record = await createVerificationRecord(
-          generatedPassport,
-          calculatedPortfolio,
-          currentSlot
-        );
-
-        // 5. Update state
-        setNormalizedData(normData);
-        setPortfolio(calculatedPortfolio);
-        setPassport(generatedPassport);
-        setVerificationRecord(record);
-
-        const updatedWallet: Wallet = {
-          ...wallet,
-          address: cleanAddress,
-          entryMethod,
-          connectorName,
-          connected: entryMethod === 'connected',
-          isReadOnlyScan: entryMethod === 'scanned',
-          label: sourceLabel || (entryMethod === 'connected' ? `${connectorName} (${cleanAddress.slice(0, 4)}...${cleanAddress.slice(-4)})` : 'Scanned Address'),
-        };
-        setWallet(updatedWallet);
-
-        // Multi-Wallet registry abstraction
-        setDiscoveredWallets((prev) => {
-          const existingIndex = prev.findIndex(
-            (w) => w.address.toLowerCase() === cleanAddress.toLowerCase()
-          );
-          const walletSummary = {
-            verifiedValueUsd: generatedPassport.verifiedEquityValueUsd,
-            holdingCount: generatedPassport.holdingCount,
-            tier: generatedPassport.tier,
-          };
-
-          if (existingIndex >= 0) {
-            const updated = [...prev];
-            updated[existingIndex] = {
-              ...updated[existingIndex],
-              entryMethod,
-              connectorName,
-              portfolioSummary: walletSummary,
-              isPrimary: true,
-            };
-            return updated.map((w, idx) => ({ ...w, isPrimary: idx === existingIndex }));
-          } else {
-            const newDiscovered = createDiscoveredWallet(
-              cleanAddress,
-              entryMethod,
-              connectorName,
-              sourceLabel
-            );
-            newDiscovered.portfolioSummary = walletSummary;
-            return [newDiscovered, ...prev.map((w) => ({ ...w, isPrimary: false }))];
-          }
-        });
-
-        // 6. Resolve Scanner State based on normalized holdings and warnings
-        if (normData.partialWarnings && normData.partialWarnings.length > 0 && calculatedPortfolio.holdings.length > 0) {
-          setScannerState('partial data');
-          setScanError(`Partial sync completed with notices: ${normData.partialWarnings.join(', ')}`);
-        } else if (calculatedPortfolio.holdings.length === 0) {
-          setScannerState('no supported assets');
-          setScanError(null);
-        } else {
-          setScannerState('success');
-          setScanError(null);
-        }
-      } catch (err: unknown) {
-        console.error('Blockchain data provider error:', err);
-        const errMsg = err instanceof Error ? err.message : String(err);
-
-        // Clear verified holdings to ensure non-fabrication
-        setNormalizedData(null);
-        setPortfolio(null);
-        setPassport(null);
-        setVerificationRecord(null);
-
-        // Set explicit network/provider error state with actionable guidance
-        setScannerState('network error');
-        if (errMsg.includes('429') || errMsg.includes('rate limit') || errMsg.includes('403')) {
-          setScanError(
-            'Solana RPC rate limit reached. Please configure a custom RPC endpoint in Settings or switch to Sandbox mode to explore demo portfolios.'
-          );
-        } else if (errMsg.includes('unavailable') || errMsg.includes('Failed to fetch') || errMsg.includes('NetworkError')) {
-          setScanError(
-            `Solana data provider is unreachable: ${errMsg}. Check your network, configure a dedicated RPC in Settings, or use Sandbox mode.`
-          );
-        } else {
-          setScanError(`Onchain data retrieval error: ${errMsg}`);
-        }
-      } finally {
-        setIsScanning(false);
+      if (forceDev || isKnownSample) {
+        setPreferences((prev) => ({ ...prev, useDevAdapter: true }));
       }
+
+      const label = sourceLabel || (discoveredWallets.length === 0 ? 'Primary' : 'Scanned Address');
+      await addWallet(
+        cleanAddress,
+        label,
+        explicitEntryMethod || 'scanned',
+        connectorNameOverride || 'Public Ledger Scan'
+      );
     },
-    [preferences.useDevAdapter, preferences.rpcEndpoint, wallet]
+    [addWallet, discoveredWallets.length]
   );
 
   /** Read-only wallet connection (Phantom / Solflare / Backpack / Simulated) */
   const connectWallet = useCallback(
     async (providerId?: string, simulate = false) => {
-      setIsScanning(true);
-      setScanError(null);
-      setScannerState('validating');
+      const provName =
+        providerId === 'solflare'
+          ? 'Solflare'
+          : providerId === 'backpack'
+          ? 'Backpack'
+          : simulate
+          ? 'Sandbox Simulator'
+          : 'Phantom';
 
-      try {
-        let connectionResult: { address: string; connectorName: string; entryMethod: WalletEntryMethod };
-
-        if (simulate) {
-          const providerName =
-            providerId === 'solflare'
-              ? 'Solflare (Sandbox)'
-              : providerId === 'backpack'
-              ? 'Backpack (Sandbox)'
-              : 'Phantom (Sandbox)';
-          connectionResult = simulateExtensionConnection(providerName);
-        } else {
-          connectionResult = await connectReadonlyWallet(providerId);
-        }
-
-        const { address, connectorName, entryMethod } = connectionResult;
-
-        setWallet((prev) => ({
-          ...prev,
-          address,
-          connected: true,
-          connectorName,
-          entryMethod,
-          isReadOnlyScan: false,
-          label: `${connectorName} (${address.slice(0, 4)}...${address.slice(-4)})`,
-        }));
-
-        setConnectWalletModalOpen(false);
-
-        // Automatically scan the newly connected public address with entryMethod 'connected'
-        await scanAddress(address, `${connectorName} Wallet`, simulate, 'connected', connectorName);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Wallet connection failed';
-        setScannerState('network error');
-        setScanError(message);
-      } finally {
-        setIsScanning(false);
-      }
+      await addWallet('', 'Primary', 'connected', provName, simulate);
+      setConnectWalletModalOpen(false);
     },
-    [scanAddress]
+    [addWallet]
   );
 
-  /** Disconnect wallet */
+  /** Disconnect wallet and clear active session */
   const disconnect = useCallback(async () => {
     await disconnectBrowserWallet();
     setWallet(createInitialWalletState());
@@ -327,37 +503,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setNormalizedData(null);
     setScannerState('idle');
     setScanError(null);
-  }, []);
+    setDiscoveredWallets([]);
+    persistWallets([]);
+    pipelineCache.current.clear();
+  }, [persistWallets]);
 
-  /** Switch active wallet from multi-wallet list */
+  /** Select active wallet / focus view */
   const selectWallet = useCallback(
     async (walletId: string) => {
-      const selected = discoveredWallets.find((w) => w.id === walletId);
-      if (!selected) return;
-
-      setActiveWalletId(walletId);
-      setDiscoveredWallets((prev) =>
-        prev.map((w) => ({ ...w, isPrimary: w.id === walletId }))
-      );
-
-      await scanAddress(
-        selected.address,
-        selected.label,
-        undefined,
-        selected.entryMethod,
-        selected.connectorName
-      );
+      await setPrimaryWallet(walletId);
     },
-    [discoveredWallets, scanAddress]
+    [setPrimaryWallet]
   );
-
-  /** Remove wallet from multi-wallet list */
-  const removeWallet = useCallback((walletId: string) => {
-    setDiscoveredWallets((prev) => prev.filter((w) => w.id !== walletId));
-  }, []);
 
   const setPrivacyMode = useCallback((mode: PrivacyMode) => {
     setPreferences((prev) => ({ ...prev, privacyMode: mode }));
+  }, []);
+
+  const updatePrivacyControls = useCallback((updated: Partial<PrivacyControlsConfig>) => {
+    setPreferences((prev) => {
+      const currentControls = prev.privacyControls || loadUserPrivacyControls();
+      const next = { ...currentControls, ...updated };
+      saveUserPrivacyControls(next);
+      return { ...prev, privacyControls: next };
+    });
   }, []);
 
   const setUseDevAdapter = useCallback((enabled: boolean) => {
@@ -371,18 +540,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const loadSampleProfile = useCallback(
     async (sampleAddress: string) => {
       setPreferences((prev) => ({ ...prev, useDevAdapter: true }));
-      await scanAddress(sampleAddress, 'Sample Portfolio', true, 'scanned', 'Public Ledger Scan');
+      await scanAddress(sampleAddress, 'Primary (Tech Allocator)', true, 'scanned', 'Public Ledger Scan');
     },
     [scanAddress]
   );
 
-  // Initialize with the first sample profile for instant demonstration if no address has been scanned
+  // Initialize: if wallets stored in localStorage, re-aggregate them; else load default sample profile
   useEffect(() => {
-    const initialSample = DEV_SAMPLE_WALLETS[0];
     if (!portfolio && !isScanning) {
-      loadSampleProfile(initialSample.address);
+      if (discoveredWallets.length > 0) {
+        reaggregateWallets(discoveredWallets);
+      } else {
+        const initialSample = DEV_SAMPLE_WALLETS[0];
+        loadSampleProfile(initialSample.address);
+      }
     }
-  }, [loadSampleProfile, portfolio, isScanning]);
+  }, []); // Run once on mount
 
   const value: AppContextType = {
     wallet,
@@ -400,15 +573,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     isSettingsModalOpen,
     isConnectWalletModalOpen,
     isRegistryModalOpen,
+    isAddWalletModalOpen,
+    isWalletManagerOpen,
     setConnectWalletModalOpen,
     setRegistryModalOpen,
+    setAddWalletModalOpen,
+    setWalletManagerOpen,
     scanAddress,
+    addWallet,
+    renameWallet,
+    removeWallet,
+    setPrimaryWallet,
     connectWallet,
     disconnect,
     selectWallet,
-    removeWallet,
     resetScannerState,
     setPrivacyMode,
+    updatePrivacyControls,
     setUseDevAdapter,
     setRpcEndpoint,
     setVerificationModalOpen,

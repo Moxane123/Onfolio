@@ -50,6 +50,15 @@ import { OnfolioLogoMark } from '../brand/OnfolioLogo';
 import { Badge } from '../ui/Badge';
 import { Button } from '../ui/Button';
 import { SharePassportModal } from './SharePassportModal';
+import { PrivacySharingCenterModal } from './PrivacySharingCenterModal';
+import { VerificationBadge } from '../verification/VerificationBadge';
+import { VerificationInspectorModal } from '../verification/VerificationInspectorModal';
+import { PublicPassportEvidenceBanner } from '../verification/PublicPassportEvidenceBanner';
+import {
+  buildHoldingVerificationEvidence,
+  determineHoldingVerificationState,
+} from '../../services/verification/evidenceEngine';
+import { HoldingVerificationEvidence } from '../../types/verification';
 
 interface InvestmentPassportViewProps {
   passport: Passport;
@@ -59,6 +68,7 @@ interface InvestmentPassportViewProps {
   onOpenAudit: () => void;
   onSwitchToDashboard: () => void;
   onOpenRegistryModal: () => void;
+  onViewSharedPage?: (publicId: string) => void;
 }
 
 export const InvestmentPassportView: React.FC<InvestmentPassportViewProps> = ({
@@ -69,15 +79,23 @@ export const InvestmentPassportView: React.FC<InvestmentPassportViewProps> = ({
   onOpenAudit,
   onSwitchToDashboard,
   onOpenRegistryModal,
+  onViewSharedPage,
 }) => {
   const [copiedId, setCopiedId] = useState(false);
   const [copiedAddress, setCopiedAddress] = useState(false);
   const [isShareModalOpen, setShareModalOpen] = useState(false);
+  const [inspectEvidence, setInspectEvidence] = useState<HoldingVerificationEvidence | null>(null);
 
   const isMasked = preferences.privacyMode === 'masked_balances';
   const displayVal = formatMaskedCurrency(passport.verifiedEquityValueUsd, preferences.privacyMode);
   const displayAddress = formatMaskedAddress(passport.walletAddress, preferences.privacyMode);
   const explorerUrl = getSolanaExplorerUrl(passport.walletAddress);
+
+  const currentVerification = determineHoldingVerificationState({
+    isMockData: portfolio.isMockData,
+    updatedAt: portfolio.updatedAt,
+    isPricingStale: portfolio.pricingFreshness?.isStale,
+  });
 
   const handleCopyId = async () => {
     const ok = await copyToClipboard(passport.profileIdentifier);
@@ -399,6 +417,13 @@ export const InvestmentPassportView: React.FC<InvestmentPassportViewProps> = ({
         </div>
       </div>
 
+      {/* Public Passport Transparency & Evidence Banner */}
+      <PublicPassportEvidenceBanner
+        passport={passport}
+        portfolio={portfolio}
+        onInspectEvidence={onOpenAudit}
+      />
+
       {/* 3. CRITICAL SECTION: VERIFIED ONCHAIN DATA vs SELF-REPORTED / UNVERIFIED DATA */}
       <div id="passport-verification-distinction-section" className="space-y-4">
         <div>
@@ -552,20 +577,48 @@ export const InvestmentPassportView: React.FC<InvestmentPassportViewProps> = ({
                   </div>
                 </div>
 
-                <div className="mt-4 pt-3 border-t border-[#F0ECE5] flex items-center justify-between text-xs">
-                  <div className="flex items-center space-x-1.5 text-[#2A7954] font-medium">
-                    <BadgeCheck className="w-4 h-4" />
-                    <span>{h.asset.collateralization}</span>
+                <div className="mt-4 pt-3 border-t border-[#F0ECE5] flex items-center justify-between text-xs gap-2 flex-wrap">
+                  <VerificationBadge
+                    state={currentVerification.state}
+                    size="sm"
+                    interactive={true}
+                    onClick={() => {
+                      setInspectEvidence(
+                        buildHoldingVerificationEvidence(
+                          h,
+                          portfolio,
+                          portfolio.walletAddress,
+                          preferences
+                        )
+                      );
+                    }}
+                  />
+                  <div className="flex items-center space-x-3">
+                    <button
+                      onClick={() => {
+                        setInspectEvidence(
+                          buildHoldingVerificationEvidence(
+                            h,
+                            portfolio,
+                            portfolio.walletAddress,
+                            preferences
+                          )
+                        );
+                      }}
+                      className="text-xs font-semibold text-[#D26E46] hover:text-[#BF5D35] transition-colors cursor-pointer flex items-center space-x-1"
+                    >
+                      <span>Inspect Evidence</span>
+                    </button>
+                    <a
+                      href={holdingExplUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[#798596] hover:text-[#191F28] flex items-center space-x-1 font-mono text-[11px]"
+                    >
+                      <span>Account</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
                   </div>
-                  <a
-                    href={holdingExplUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[#798596] hover:text-[#191F28] flex items-center space-x-1 font-mono text-[11px]"
-                  >
-                    <span>Inspect Account</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
                 </div>
               </div>
             );
@@ -776,14 +829,27 @@ export const InvestmentPassportView: React.FC<InvestmentPassportViewProps> = ({
         </Button>
       </div>
 
-      {/* Share Modal */}
-      <SharePassportModal
+      {/* Privacy & Selective Disclosure Sharing Modal */}
+      <PrivacySharingCenterModal
         isOpen={isShareModalOpen}
         onClose={() => setShareModalOpen(false)}
         passport={passport}
         portfolio={portfolio}
         preferences={preferences}
-        onTogglePrivacy={onTogglePrivacy}
+        onViewSharedPage={(publicId) => {
+          if (onViewSharedPage) {
+            onViewSharedPage(publicId);
+          } else if (typeof window !== 'undefined') {
+            window.location.href = `/passport/${publicId}`;
+          }
+        }}
+      />
+
+      {/* Holding Verification Evidence Inspector */}
+      <VerificationInspectorModal
+        evidence={inspectEvidence}
+        isOpen={Boolean(inspectEvidence)}
+        onClose={() => setInspectEvidence(null)}
       />
     </div>
   );
